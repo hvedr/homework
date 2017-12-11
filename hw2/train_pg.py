@@ -1,46 +1,70 @@
 import numpy as np
-import tensorflow as tf
+import pandas as pd
 import gym
+#import logz_pytorch as logz
 import logz
 import scipy.signal
 import os
 import time
 import inspect
-from multiprocessing import Process
+
+import torch
+import torch.nn as nn
+import torch.optim as optim
+import torch.nn.functional as F
+from torch.autograd import Variable
 
 #============================================================================================#
 # Utilities
 #============================================================================================#
 
-def build_mlp(
-        input_placeholder, 
-        output_size,
-        scope, 
-        n_layers=2, 
-        size=64, 
-        activation=tf.tanh,
-        output_activation=None
-        ):
-    #========================================================================================#
-    #                           ----------SECTION 3----------
-    # Network building
-    #
-    # Your code should make a feedforward neural network (also called a multilayer perceptron)
-    # with 'n_layers' hidden layers of size 'size' units. 
-    # 
-    # The output layer should have size 'output_size' and activation 'output_activation'.
-    #
-    # Hint: use tf.layers.dense
-    #========================================================================================#
-
-    with tf.variable_scope(scope):
-        # YOUR_CODE_HERE
-        pass
 
 def pathlength(path):
     return len(path["reward"])
 
 
+class MLP(nn.Module):
+
+    # ========================================================================================#
+    #                           ----------SECTION 3----------
+    # Network building
+    #
+    # Your code should make a feedforward neural network (also called a multilayer perceptron)
+    # with 'n_layers' hidden layers of size 'size' units.
+    #
+    # The output layer should have size 'output_size' and activation 'output_activation'.
+    #
+    # ========================================================================================#
+
+    def __init__(self, input_size, output_size, n_layers=2, size=64, activation=F.tanh, output_activation=None):
+        super(MLP, self).__init__()
+        self.dropout_rate = 0.3
+        self.fc1 = nn.Linear(input_size, size)
+        self.fc2 = nn.Linear(size, size)
+        self.fc3 = nn.Linear(size, output_size)
+#         self.fc = (
+#             [nn.Linear(input_size, size)] + 
+#             [nn.Linear(size, size)] * n_layers + 
+#             [nn.Linear(size, output_size)]
+#         )
+        self.drop = nn.Dropout(p = self.dropout_rate)
+        self.activation = activation
+        self.output_activation = output_activation
+
+    # assert output_activation is None, 'output activation must be None, other options not implemented'
+ 
+    def forward(self, x):
+        x = self.activation(self.fc1(x))  
+#        x = self.activation(self.fc2(x))  
+        if self.output_activation is None:
+            x = self.fc3(x)                      # Last layer 
+        else:
+            x = self.output_activation(self.fc3(x))  
+        return x.view(x.size(0), -1)
+
+    def set_dropout_rate(self, p):
+        self.dropout_rate = p
+        
 
 #============================================================================================#
 # Policy Gradient
@@ -48,16 +72,16 @@ def pathlength(path):
 
 def train_PG(exp_name='',
              env_name='CartPole-v0',
-             n_iter=100, 
-             gamma=1.0, 
-             min_timesteps_per_batch=1000, 
+             n_iter=100,
+             gamma=1.0,
+             min_timesteps_per_batch=1000,
              max_path_length=None,
-             learning_rate=5e-3, 
-             reward_to_go=True, 
-             animate=True, 
-             logdir=None, 
+             learning_rate=5e-3,
+             reward_to_go=True,
+             animate=True,
+             logdir=None,
              normalize_advantages=True,
-             nn_baseline=False, 
+             nn_baseline=False,
              seed=0,
              # network arguments
              n_layers=1,
@@ -68,20 +92,21 @@ def train_PG(exp_name='',
 
     # Configure output directory for logging
     logz.configure_output_dir(logdir)
-
+    logz.G.first_row = True
     # Log experimental parameters
+    #args = inspect.getfullargspec(train_PG)[0]
     args = inspect.getargspec(train_PG)[0]
     locals_ = locals()
     params = {k: locals_[k] if k in locals_ else None for k in args}
     logz.save_params(params)
 
     # Set random seeds
-    tf.set_random_seed(seed)
+    torch.manual_seed(seed)
     np.random.seed(seed)
 
     # Make the gym environment
     env = gym.make(env_name)
-    
+
     # Is this env continuous, or discrete?
     discrete = isinstance(env.action_space, gym.spaces.Discrete)
 
@@ -90,17 +115,17 @@ def train_PG(exp_name='',
 
     #========================================================================================#
     # Notes on notation:
-    # 
+    #
     # Symbolic variables have the prefix sy_, to distinguish them from the numerical values
     # that are computed later in the function
-    # 
+    #
     # Prefixes and suffixes:
-    # ob - observation 
+    # ob - observation
     # ac - action
     # _no - this tensor should have shape (batch size /n/, observation dim)
     # _na - this tensor should have shape (batch size /n/, action dim)
     # _n  - this tensor should have shape (batch size /n/)
-    # 
+    #
     # Note: batch size /n/ is defined at runtime, and until then, the shape for that axis
     # is None
     #========================================================================================#
@@ -109,84 +134,10 @@ def train_PG(exp_name='',
     ob_dim = env.observation_space.shape[0]
     ac_dim = env.action_space.n if discrete else env.action_space.shape[0]
 
-    #========================================================================================#
-    #                           ----------SECTION 4----------
-    # Placeholders
-    # 
-    # Need these for batch observations / actions / advantages in policy gradient loss function.
-    #========================================================================================#
-
-    sy_ob_no = tf.placeholder(shape=[None, ob_dim], name="ob", dtype=tf.float32)
-    if discrete:
-        sy_ac_na = tf.placeholder(shape=[None], name="ac", dtype=tf.int32) 
-    else:
-        sy_ac_na = tf.placeholder(shape=[None, ac_dim], name="ac", dtype=tf.float32) 
-
-    # Define a placeholder for advantages
-    sy_adv_n = TODO
-
-
-    #========================================================================================#
-    #                           ----------SECTION 4----------
-    # Networks
-    # 
-    # Make symbolic operations for
-    #   1. Policy network outputs which describe the policy distribution.
-    #       a. For the discrete case, just logits for each action.
-    #
-    #       b. For the continuous case, the mean / log std of a Gaussian distribution over 
-    #          actions.
-    #
-    #      Hint: use the 'build_mlp' function you defined in utilities.
-    #
-    #      Note: these ops should be functions of the placeholder 'sy_ob_no'
-    #
-    #   2. Producing samples stochastically from the policy distribution.
-    #       a. For the discrete case, an op that takes in logits and produces actions.
-    #
-    #          Should have shape [None]
-    #
-    #       b. For the continuous case, use the reparameterization trick:
-    #          The output from a Gaussian distribution with mean 'mu' and std 'sigma' is
-    #
-    #               mu + sigma * z,         z ~ N(0, I)
-    #
-    #          This reduces the problem to just sampling z. (Hint: use tf.random_normal!)
-    #
-    #          Should have shape [None, ac_dim]
-    #
-    #      Note: these ops should be functions of the policy network output ops.
-    #
-    #   3. Computing the log probability of a set of actions that were actually taken, 
-    #      according to the policy.
-    #
-    #      Note: these ops should be functions of the placeholder 'sy_ac_na', and the 
-    #      policy network output ops.
-    #   
-    #========================================================================================#
-
-    if discrete:
-        # YOUR_CODE_HERE
-        sy_logits_na = TODO
-        sy_sampled_ac = TODO # Hint: Use the tf.multinomial op
-        sy_logprob_n = TODO
-
-    else:
-        # YOUR_CODE_HERE
-        sy_mean = TODO
-        sy_logstd = TODO # logstd should just be a trainable variable, not a network output.
-        sy_sampled_ac = TODO
-        sy_logprob_n = TODO  # Hint: Use the log probability under a multivariate gaussian. 
-
-
-
-    #========================================================================================#
-    #                           ----------SECTION 4----------
-    # Loss Function and Training Operation
-    #========================================================================================#
-
-    loss = TODO # Loss function that we'll differentiate to get the policy gradient.
-    update_op = tf.train.AdamOptimizer(learning_rate).minimize(loss)
+    mlp = MLP(input_size = ob_dim, output_size = ac_dim, 
+              n_layers = n_layers, size = size,output_activation=F.softmax)
+#     loss = TODO # Loss function that we'll differentiate to get the policy gradient.
+    update_op = optim.Adam(mlp.parameters(), lr=learning_rate)
 
 
     #========================================================================================#
@@ -195,28 +146,9 @@ def train_PG(exp_name='',
     #========================================================================================#
 
     if nn_baseline:
-        baseline_prediction = tf.squeeze(build_mlp(
-                                sy_ob_no, 
-                                1, 
-                                "nn_baseline",
-                                n_layers=n_layers,
-                                size=size))
-        # Define placeholders for targets, a loss function and an update op for fitting a 
-        # neural network baseline. These will be used to fit the neural network baseline. 
-        # YOUR_CODE_HERE
-        baseline_update_op = TODO
-
-
-    #========================================================================================#
-    # Tensorflow Engineering: Config, Session, Variable initialization
-    #========================================================================================#
-
-    tf_config = tf.ConfigProto(inter_op_parallelism_threads=1, intra_op_parallelism_threads=1) 
-
-    sess = tf.Session(config=tf_config)
-    sess.__enter__() # equivalent to `with sess:`
-    tf.global_variables_initializer().run() #pylint: disable=E1101
-
+        mlp_baseline = MLP(ob_dim, 1, n_layers=n_layers, size=size,output_activation=None)
+        update_baseline_op = optim.Adam(mlp_baseline.parameters(), lr=learning_rate)
+        q_prev_mean, q_prev_std = 0., 1.
 
 
     #========================================================================================#
@@ -241,16 +173,26 @@ def train_PG(exp_name='',
                     env.render()
                     time.sleep(0.05)
                 obs.append(ob)
-                ac = sess.run(sy_sampled_ac, feed_dict={sy_ob_no : ob[None]})
-                ac = ac[0]
+
+                #TODO: CHECK_IT!
+                ac_logits = mlp(Variable(torch.Tensor(ob[None]))).data.numpy()[0,:]
+                
+                # Pick action according to mlp policy. mlp output is actions logits
+
+#                 ac_probs = 1. / (1 + np.exp( -ac_logits))
+#                 ac_probs = ac_probs / ac_probs.sum()
+                ac = np.random.choice(range(ac_dim), p = ac_logits)
+                
+                #ac = ac[0]
                 acs.append(ac)
+                #1/0
                 ob, rew, done, _ = env.step(ac)
                 rewards.append(rew)
                 steps += 1
                 if done or steps > max_path_length:
                     break
-            path = {"observation" : np.array(obs), 
-                    "reward" : np.array(rewards), 
+            path = {"observation" : np.array(obs),
+                    "reward" : np.array(rewards),
                     "action" : np.array(acs)}
             paths.append(path)
             timesteps_this_batch += pathlength(path)
@@ -258,7 +200,7 @@ def train_PG(exp_name='',
                 break
         total_timesteps += timesteps_this_batch
 
-        # Build arrays for observation, action for the policy gradient update by concatenating 
+        # Build arrays for observation, action for the policy gradient update by concatenating
         # across paths
         ob_no = np.concatenate([path["observation"] for path in paths])
         ac_na = np.concatenate([path["action"] for path in paths])
@@ -268,26 +210,26 @@ def train_PG(exp_name='',
         # Computing Q-values
         #
         # Your code should construct numpy arrays for Q-values which will be used to compute
-        # advantages (which will in turn be fed to the placeholder you defined above). 
+        # advantages.
         #
         # Recall that the expression for the policy gradient PG is
         #
         #       PG = E_{tau} [sum_{t=0}^T grad log pi(a_t|s_t) * (Q_t - b_t )]
         #
-        # where 
+        # where
         #
         #       tau=(s_0, a_0, ...) is a trajectory,
         #       Q_t is the Q-value at time t, Q^{pi}(s_t, a_t),
-        #       and b_t is a baseline which may depend on s_t. 
+        #       and b_t is a baseline which may depend on s_t.
         #
         # You will write code for two cases, controlled by the flag 'reward_to_go':
         #
-        #   Case 1: trajectory-based PG 
+        #   Case 1: trajectory-based PG
         #
         #       (reward_to_go = False)
         #
-        #       Instead of Q^{pi}(s_t, a_t), we use the total discounted reward summed over 
-        #       entire trajectory (regardless of which time step the Q-value should be for). 
+        #       Instead of Q^{pi}(s_t, a_t), we use the total discounted reward summed over
+        #       entire trajectory (regardless of which time step the Q-value should be for).
         #
         #       For this case, the policy gradient estimator is
         #
@@ -301,7 +243,7 @@ def train_PG(exp_name='',
         #
         #           Q_t = Ret(tau)
         #
-        #   Case 2: reward-to-go PG 
+        #   Case 2: reward-to-go PG
         #
         #       (reward_to_go = True)
         #
@@ -312,13 +254,21 @@ def train_PG(exp_name='',
         #
         #
         # Store the Q-values for all timesteps and all trajectories in a variable 'q_n',
-        # like the 'ob_no' and 'ac_na' above. 
+        # like the 'ob_no' and 'ac_na' above.
         #
         #====================================================================================#
 
         # YOUR_CODE_HERE
-        q_n = TODO
-
+        if reward_to_go:
+            q_n = np.concatenate([
+                                    np.cumsum([r * gamma ** i for i,r in enumerate(path["reward"])][::-1])[::-1]                
+                                 for path in paths])
+        else:            
+            q_n = np.concatenate([
+                                    [sum([r * gamma ** i for i,r in enumerate(path["reward"])])] 
+                                        * len(path["reward"]) 
+                                 for path in paths])
+            
         #====================================================================================#
         #                           ----------SECTION 5----------
         # Computing Baselines
@@ -332,9 +282,11 @@ def train_PG(exp_name='',
             # Hint #bl1: rescale the output from the nn_baseline to match the statistics
             # (mean and std) of the current or previous batch of Q-values. (Goes with Hint
             # #bl2 below.)
-
-            b_n = TODO
+            v_n = mlp_baseline(Variable(torch.Tensor(ob_no)))[:,0]
+            b_n = v_n.data.numpy() * q_prev_std + q_prev_mean
             adv_n = q_n - b_n
+            q_prev_mean, q_prev_std = q_n.mean(),q_n.std()
+            
         else:
             adv_n = q_n.copy()
 
@@ -345,43 +297,59 @@ def train_PG(exp_name='',
 
         if normalize_advantages:
             # On the next line, implement a trick which is known empirically to reduce variance
-            # in policy gradient methods: normalize adv_n to have mean zero and std=1. 
+            # in policy gradient methods: normalize adv_n to have mean zero and std=1.
             # YOUR_CODE_HERE
-            pass
+            adv_n = (adv_n - adv_n.mean())/(adv_n.std() + 1e-15)
 
 
         #====================================================================================#
         #                           ----------SECTION 5----------
         # Optimizing Neural Network Baseline
         #====================================================================================#
+
         if nn_baseline:
             # ----------SECTION 5----------
-            # If a neural network baseline is used, set up the targets and the inputs for the 
-            # baseline. 
-            # 
-            # Fit it to the current batch in order to use for the next iteration. Use the 
+            # If a neural network baseline is used, set up the targets and the inputs for the
+            # baseline.
+            #
+            # Fit it to the current batch in order to use for the next iteration. Use the
             # baseline_update_op you defined earlier.
             #
-            # Hint #bl2: Instead of trying to target raw Q-values directly, rescale the 
+            # Hint #bl2: Instead of trying to target raw Q-values directly, rescale the
             # targets to have mean zero and std=1. (Goes with Hint #bl1 above.)
 
-            # YOUR_CODE_HERE
-            pass
+            baseline_loss = ((v_n - Variable(torch.Tensor((q_n-q_n.mean())/q_n.std())))**2).mean()
+            update_baseline_op.zero_grad()
+            baseline_loss.backward()
+            update_baseline_op.step()
+            
 
         #====================================================================================#
         #                           ----------SECTION 4----------
         # Performing the Policy Update
         #====================================================================================#
 
-        # Call the update operation necessary to perform the policy gradient update based on 
+        # Call the update operation necessary to perform the policy gradient update based on
         # the current batch of rollouts.
-        # 
+        #
         # For debug purposes, you may wish to save the value of the loss function before
-        # and after an update, and then log them below. 
+        # and after an update, and then log them below.
 
+#         PG = E_{tau} [sum_{t=0}^T grad log pi(a_t|s_t) * (Q_t - b_t )]
         # YOUR_CODE_HERE
 
+        #Another solution
+#         a,ac,a.view(-1)[torch.LongTensor(ac+3*np.arange(20))]
+        adv_var = torch.autograd.Variable(torch.FloatTensor(adv_n) , requires_grad=False)
+    
+        actions_t = torch.LongTensor(ac_na+ac_dim*np.arange(ob_no.shape[0]))         
+        PGI = - (torch.log(mlp(Variable(torch.Tensor(ob_no))).view(-1)[actions_t]) * adv_var).sum() / len(paths)
+        update_op.zero_grad()
+        PGI.backward()
+        update_op.step()
 
+        
+        
         # Log diagnostics
         returns = [path["reward"].sum() for path in paths]
         ep_lengths = [pathlength(path) for path in paths]
@@ -396,7 +364,6 @@ def train_PG(exp_name='',
         logz.log_tabular("TimestepsThisBatch", timesteps_this_batch)
         logz.log_tabular("TimestepsSoFar", total_timesteps)
         logz.dump_tabular()
-        logz.pickle_tf_vars()
 
 
 def main():
@@ -419,6 +386,24 @@ def main():
     parser.add_argument('--size', '-s', type=int, default=32)
     args = parser.parse_args()
 
+#    args = pd.Series()
+#    args.batch_size=1000
+#    args.discount=1.0
+#    args.dont_normalize_advantages=False
+#    args.env_name='CartPole-v0'
+#    args.ep_len=-1.0
+#    args.exp_name='sb_no_rtg_dna_2'
+#    args.learning_rate=5e-3
+#    args.n_experiments=4
+#    args.n_iter=100
+#    args.n_layers=1
+#    args.nn_baseline=False
+#    args.render=False
+#    args.reward_to_go=False
+#    args.seed=1
+#    args.size_=32
+
+                
     if not(os.path.exists('data')):
         os.makedirs('data')
     logdir = args.exp_name + '_' + args.env_name + '_' + time.strftime("%d-%m-%Y_%H-%M-%S")
@@ -444,17 +429,13 @@ def main():
                 animate=args.render,
                 logdir=os.path.join(logdir,'%d'%seed),
                 normalize_advantages=not(args.dont_normalize_advantages),
-                nn_baseline=args.nn_baseline, 
+                nn_baseline=args.nn_baseline,
                 seed=seed,
                 n_layers=args.n_layers,
                 size=args.size
                 )
-        # Awkward hacky process runs, because Tensorflow does not like
-        # repeatedly calling train_PG in the same thread.
-        p = Process(target=train_func, args=tuple())
-        p.start()
-        p.join()
-        
+        train_func()
+
 
 if __name__ == "__main__":
     main()
